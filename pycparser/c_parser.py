@@ -6,6 +6,8 @@
 # Eli Bendersky [https://eli.thegreenplace.net/]
 # License: BSD
 #------------------------------------------------------------------------------
+import os
+
 from .ply import yacc
 
 from . import c_ast
@@ -117,12 +119,13 @@ class CParser(PLYParser):
         # Stack of scopes for keeping track of symbols. _scope_stack[-1] is
         # the current (topmost) scope. Each scope is a dictionary that
         # specifies whether a name is a type. If _scope_stack[n][name] is
-        # True, 'name' is currently a type in the scope. If it's False,
+        # "typedef", 'name' is currently a type in the scope. If it's "id",
         # 'name' is used in the scope but not as a type (for instance, if we
-        # saw: int name;
+        # saw: int name; If it's "data", then it is used as a name for `data`.
         # If 'name' is not a key in _scope_stack[n] then 'name' was not defined
         # in this scope at all.
         self._scope_stack = [dict()]
+        self._data_defs = {}
 
         # Keeps track of the last token given to yacc (the lookahead token)
         self._last_yielded_token = None
@@ -161,21 +164,35 @@ class CParser(PLYParser):
     def _add_typedef_name(self, name, coord):
         """ Add a new typedef name (ie a TYPEID) to the current scope
         """
-        if not self._scope_stack[-1].get(name, True):
+        val = self._scope_stack[-1].get(name)
+        if val and val[0] != "typedef":
             self._parse_error(
-                "Typedef %r previously declared as non-typedef "
-                "in this scope" % name, coord)
-        self._scope_stack[-1][name] = True
+                "Typedef %r previously declared as %s in this scope" % (name, val), coord)
+        self._scope_stack[-1][name] = ("typedef", None)
+
+    def _add_data_def(self, name, coord, defn):
+        val = self._scope_stack[-1].get(name)
+        if val and val[0] != "data":
+            self._parse_error(
+                "Data %r previously declared as %s in this scope" % (name, val), coord)
+        self._scope_stack[-1][name] = ("data", defn)
 
     def _add_identifier(self, name, coord):
         """ Add a new object, function, or enum member name (ie an ID) to the
             current scope
         """
-        if self._scope_stack[-1].get(name, False):
+        val = self._scope_stack[-1].get(name)
+        if val and val[0] != "id":
             self._parse_error(
-                "Non-typedef %r previously declared as typedef "
-                "in this scope" % name, coord)
-        self._scope_stack[-1][name] = False
+                "ID %r previously declared as %s in this scope" % (name, val), coord)
+        self._scope_stack[-1][name] = ("id", None)
+
+    def _find_in_scope(self, name):
+        for scope in reversed(self._scope_stack):
+            got = scope.get(name)
+            if got:
+                return got
+        return None
 
     def _is_type_in_scope(self, name):
         """ Is *name* a typedef-name in the current scope?
@@ -184,7 +201,8 @@ class CParser(PLYParser):
             # If name is an identifier in this scope it shadows typedefs in
             # higher scopes.
             in_scope = scope.get(name)
-            if in_scope is not None: return in_scope
+            if in_scope is not None:
+                return in_scope[0] in ("typedef", "data")
         return False
 
     def _lex_error_func(self, msg, line, column):
@@ -304,6 +322,9 @@ class CParser(PLYParser):
         type = decl
         while not isinstance(type, c_ast.TypeDecl):
             type = type.type
+        if isinstance(type.type, c_ast.DataDecl):
+            # DataDecl are treated separately.
+            return decl
 
         decl.name = type.declname
         type.quals = decl.quals[:]
@@ -371,6 +392,10 @@ class CParser(PLYParser):
             to the "typedef namespace", which also includes objects,
             functions, and enum constants.
         """
+        typename_in_scope  = (len(spec['type']) > 0 and
+                              isinstance(spec['type'][0], c_ast.IdentifierType) and
+                              self._find_in_scope(spec['type'][0].names[0]))
+        is_data = typename_in_scope and typename_in_scope[0] == "data"
         is_typedef = 'typedef' in spec['storage']
         declarations = []
 
@@ -423,18 +448,44 @@ class CParser(PLYParser):
                     type=decl['decl'],
                     coord=decl['decl'].coord)
             else:
+                type = decl['decl']
+                decl_name = None
+
+                if is_data:
+                    datadef = typename_in_scope[1]
+
+                    t = type
+                    prev = None
+                    # Patch the `TypeDecl` with a `DataDecl`.
+                    while t:
+                        if isinstance(t, c_ast.TypeDecl):
+                            tn = t.declname
+                            break
+                        prev = t
+                        t = t.type
+
+                    datadecl = c_ast.DataDecl(
+                            tn,
+                            datadef.name.declname,
+                            datadef.types)
+                    decl_name = tn
+                    if prev:
+                        prev.type = datadecl
+                    else:
+                        type = datadecl
+
                 declaration = c_ast.Decl(
-                    name=None,
+                    name=decl_name,
                     quals=spec['qual'],
                     align=spec['alignment'],
                     storage=spec['storage'],
                     funcspec=spec['function'],
-                    type=decl['decl'],
+                    type=type,
                     init=decl.get('init'),
                     bitsize=decl.get('bitsize'),
                     coord=decl['decl'].coord)
 
-            if isinstance(declaration.type, (
+            if is_data or isinstance(declaration.type, (
                     c_ast.Enum, c_ast.Struct, c_ast.Union,
                     c_ast.IdentifierType)):
                 fixed_decl = declaration
@@ -443,13 +494,17 @@ class CParser(PLYParser):
 
             # Add the type name defined by typedef to a
             # symbol table (for usage in the lexer)
+            #
+            # Data definitions are added to scope elsewhere, so they're not
+            # treated here.
             if typedef_namespace:
                 if is_typedef:
                     self._add_typedef_name(fixed_decl.name, fixed_decl.coord)
                 else:
                     self._add_identifier(fixed_decl.name, fixed_decl.coord)
 
-            fixed_decl = fix_atomic_specifiers(fixed_decl)
+            if not is_data:
+                fixed_decl = fix_atomic_specifiers(fixed_decl)
             declarations.append(fixed_decl)
 
         return declarations
@@ -556,6 +611,11 @@ class CParser(PLYParser):
         """
         p[0] = p[1]
 
+    def p_external_declaration_6(self, p):
+        """ external_declaration    : data_definition
+        """
+        p[0] = p[1]
+
     def p_static_assert_declaration(self, p):
         """ static_assert           : _STATIC_ASSERT LPAREN constant_expression COMMA unified_string_literal RPAREN
                                     | _STATIC_ASSERT LPAREN constant_expression RPAREN
@@ -564,6 +624,52 @@ class CParser(PLYParser):
             p[0] = [c_ast.StaticAssert(p[3], None, self._token_coord(p, 1))]
         else:
             p[0] = [c_ast.StaticAssert(p[3], p[5], self._token_coord(p, 1))]
+
+    def p_data_set(self, p):
+        """ data_set                : DATASET ID LT MINUS type_specifier initializer
+                                    | DATASET data_set_deref ID LT MINUS type_specifier initializer
+        """
+        if len(p) == 7:
+            p[0] = c_ast.DataSet(p[2], p[5], p[6], 0)
+        else:
+            p[0] = c_ast.DataSet(p[3], p[6], p[7], len(p[2]))
+
+    def p_data_set_deref(self, p):
+        """ data_set_deref          : TIMES
+                                    | data_set_deref TIMES
+        """
+        if len(p) == 2:
+            p[0] = [c_ast.PtrDecl(quals=[], type=None, coord=self._token_coord(p, 1))]
+        else:
+            p[0] = p[1] + [c_ast.PtrDecl(quals=[], type=None, coord=self._token_coord(p, 2))]
+
+
+    def p_match(self, p):
+        """ match                   : MATCH id_declarator match_list
+        """
+        p[0] = c_ast.Match(p[2], p[3])
+
+    def p_match_list(self, p):
+        """ match_list              : match_atom
+                                    | match_list OR match_atom
+        """
+        matchers = []
+        if len(p) == 2:
+            matchers = [p[1]]
+        else:
+            for t in p[1]:
+                matchers.append(t)
+            matchers.append(p[3])
+        p[0] = matchers
+
+    def p_match_atom(self, p):
+        """ match_atom              : type_specifier ID compound_statement
+                                    | ELLIPSIS compound_statement
+        """
+        if len(p) == 3:
+            p[0] = c_ast.Matcher(None, None, p[2])
+        else:
+            p[0] = c_ast.Matcher(p[1], p[2], p[3])
 
     def p_pp_directive(self, p):
         """ pp_directive  : PPHASH
@@ -585,6 +691,31 @@ class CParser(PLYParser):
                                     | pppragma_directive_list pppragma_directive
         """
         p[0] = [p[1]] if len(p) == 2 else p[1] + [p[2]]
+
+    def p_data_definition(self, p):
+        """ data_definition         : DATA id_declarator data_definition_list
+        """
+        n = c_ast.DataDef(name=p[2], types=p[3])
+        p[0] = [n]
+        self._add_data_def(p[2].declname, self._token_coord(p, 2), n)
+
+    def p_data_definition_list(self, p):
+        """ data_definition_list    : data_definition_atom
+                                    | data_definition_list OR data_definition_atom
+        """
+        types = []
+        if len(p) == 2:
+            types = [p[1]]
+        else:
+            for t in p[1]:
+                types.append(t)
+            types.append(p[3])
+        p[0] = types
+
+    def p_data_definition_atom(self, p):
+        """ data_definition_atom    : type_specifier
+        """
+        p[0] = p[1]
 
     # In function definitions, the declarator can be followed by
     # a declaration list, for old "K&R style" function definitios.
@@ -610,7 +741,6 @@ class CParser(PLYParser):
         """ function_definition : declaration_specifiers id_declarator declaration_list_opt compound_statement
         """
         spec = p[1]
-
         p[0] = self._build_function_definition(
             spec=spec,
             decl=p[2],
@@ -630,6 +760,8 @@ class CParser(PLYParser):
                         | jump_statement
                         | pppragma_directive
                         | static_assert
+                        | data_set
+                        | match
         """
         p[0] = p[1]
 

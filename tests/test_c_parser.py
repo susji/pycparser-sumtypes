@@ -957,7 +957,7 @@ class TestCParser_fundamentals(TestCParser_base):
         s6 = """
             typedef struct foo_tag
             {
-                void* data;
+                void* _data;
             } foo, *pfoo;
         """
         s6_ast = self.parse(s6)
@@ -966,7 +966,7 @@ class TestCParser_fundamentals(TestCParser_base):
             ['Typedef', 'foo',
                 ['TypeDecl',
                     ['Struct', 'foo_tag',
-                        [['Decl', 'data',
+                        [['Decl', '_data',
                             ['PtrDecl', ['TypeDecl', ['IdentifierType', ['void']]]]]]]]])
 
         self.assertEqual(expand_decl(s6_ast.ext[1]),
@@ -974,7 +974,7 @@ class TestCParser_fundamentals(TestCParser_base):
                 ['PtrDecl',
                     ['TypeDecl',
                         ['Struct', 'foo_tag',
-                            [['Decl', 'data',
+                            [['Decl', '_data',
                                 ['PtrDecl', ['TypeDecl', ['IdentifierType', ['void']]]]]]]]]])
 
         s7 = r"""

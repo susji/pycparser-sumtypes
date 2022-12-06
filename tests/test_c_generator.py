@@ -123,13 +123,13 @@ class TestCtoC(unittest.TestCase):
         self._assert_ctoc_correct(r'''
             typedef struct node_t {
                 _Alignas(64) void* next;
-                int data;
+                int _data;
             } node;
             ''')
         self._assert_ctoc_correct(r'''
             typedef struct node_t {
                 void _Alignas(64) * next;
-                int data;
+                int _data;
             } node;
             ''')
 
@@ -183,7 +183,7 @@ class TestCtoC(unittest.TestCase):
         self._assert_ctoc_correct(r'''
             typedef struct node_t {
                 struct node_t* next;
-                int data;
+                int _data;
             } node;
             ''')
 

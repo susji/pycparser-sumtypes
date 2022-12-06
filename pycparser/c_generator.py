@@ -24,9 +24,29 @@ class CGenerator(object):
         # the _make_indent method.
         self.indent_level = 0
         self.reduce_parentheses = reduce_parentheses
+        # Keep track of variable scopes for type-checking.
+        # The first item is the translation-unit-level scope.
+        self.decls = [{}]
+
+    def scope_new(self):
+        self.decls.append({})
+
+    def scope_depart(self):
+        #print(f"scope_depart: {self.decls[-1]}")
+        self.decls.pop()
+
+    def scope_set(self, name, typ, plvl, alvl):
+        self.decls[-1][name] = (typ, plvl, alvl)
 
     def _make_indent(self):
         return ' ' * self.indent_level
+
+    def scope_find(self, name):
+        for decls in reversed(self.decls):
+            d = decls.get(name)
+            if d:
+                return d
+        return None
 
     def visit(self, node):
         method = 'visit_' + node.__class__.__name__
@@ -196,15 +216,108 @@ class CGenerator(object):
                 value=self.visit(n.value),
             )
 
+    def visit_DataDef(self, n):
+        typenames = []
+        indent = self._make_indent()
+        for t in n.types:
+            # XXX Needs Enum and Union, too.
+            if isinstance(t, c_ast.Struct):
+                typenames.append(indent * 2 + "struct " + t.name + " d_s_" + t.name + ";")
+            else:
+                typenames.append(indent * 2 + t.names[0] + " d_" + t.names[0] +";")
+        return ("struct __data_" + n.name.declname + " {\n" +
+                indent + "const char *kind;\n" +
+                indent + "union {\n" +
+                "\n".join([tn for tn in typenames]) + "\n" +
+                indent + "} data;\n};\n")
+
+    def visit_DataSet(self, n):
+        indent = self._make_indent()
+        derefs = '*' * n.derefs
+        if isinstance(n.type, c_ast.Struct):
+            return (
+                '(' + derefs + n.target + ').kind = "struct ' + n.type.name + '";\n' +
+                indent + '(' + derefs + n.target + ').data.d_s_' + n.type.name + ' = ' + self.visit(n.expr) + ";"
+            )
+        elif isinstance(n.type, c_ast.IdentifierType):
+            setval = "d_" + n.type.names[0]
+        else:
+            raise RuntimeError("handle type " + type(n.type)  + " for struct set")
+        return ('(' + derefs + n.target + ').kind = "' + n.type.names[0] + '";\n' +
+                indent + '(' + derefs + n.target + ").data." + setval + " = " + self.visit(n.expr) + ";")
+
+
+    def visit_Match(self, n):
+        ellipsis_count = 0
+
+
+        nn = n.target
+        mods = ""
+        while not isinstance(nn, c_ast.TypeDecl):
+            if isinstance(nn, c_ast.PtrDecl):
+                mods += "*"
+            nn = nn.type
+        tn = nn.declname
+        ct = 'if (!strcmp(({0}{1}).kind, "{2}")) {{ {2} {3} = ({0}{1}).data.d_{4}; {5} }}'
+
+        data_decl, _, _ = self.scope_find(tn)
+        assert isinstance(data_decl, c_ast.DataDecl)
+
+        want_types = []
+        for want_type in data_decl.types:
+            want_types.append(self.visit(want_type))
+        ms = []
+        got_types = {}
+        for m in n.matchers:
+            if m.type is None:
+                if ellipsis_count == 1:
+                    raise RuntimeError("more than one catch-all matcher: " + str(n))
+                ellipsis_count += 1
+                ms.append('{0}'.format(self.visit(m.block)))
+                continue
+
+            if isinstance(m.type, c_ast.Struct):
+                ms.append(ct.format(
+                    mods,
+                    tn,
+                    "struct " + m.type.name,
+                    m.varname,
+                    "s_" + m.type.name,
+                    self.visit(m.block)))
+            else:
+                ms.append(ct.format(
+                    mods,
+                    tn,
+                    m.type.names[0],
+                    m.varname,
+                    m.type.names[0],
+                    self.visit(m.block)))
+            got_types[self.visit(m.type)] = True
+
+        errs = 0
+        if ellipsis_count == 0:
+            for want_type in want_types:
+                found = got_types.get(want_type)
+                if not found:
+                    print("Missing matcher for " + str(want_type))
+                    errs += 1
+        if errs > 0:
+            raise RuntimeError("non-exhaustive `match`: missing {} match cases".format(errs))
+
+        return " else ".join(ms)
+
     def visit_FuncDef(self, n):
+        self.scope_new()
         decl = self.visit(n.decl)
         self.indent_level = 0
         body = self.visit(n.body)
         if n.param_decls:
             knrdecls = ';\n'.join(self.visit(p) for p in n.param_decls)
-            return decl + '\n' + knrdecls + ';\n' + body + '\n'
+            ret = decl + '\n' + knrdecls + ';\n' + body + '\n'
         else:
-            return decl + '\n' + body + '\n'
+            ret = decl + '\n' + body + '\n'
+        self.scope_depart()
+        return ret
 
     def visit_FileAST(self, n):
         s = ''
@@ -424,7 +537,41 @@ class CGenerator(object):
         if n.storage: s += ' '.join(n.storage) + ' '
         if n.align: s += self.visit(n.align[0]) + ' '
         s += self._generate_type(n.type)
+
+        # We do poor man's type-checking by injecting the declaration
+        # types into the currently active scope.
+        #
+        # _generate_type is already doing one recursion to render the
+        # declaration string but I don't want to add a whole another
+        # pass/visitor thing here. For performance, we probably should aim to
+        # do all in a single pass but at this point I'll be content if this
+        # sort of works. For clarity, a completely separate AST-transformation
+        # pass would be neatest.
+        plvl, alvl = 0, 0
+        t = n.type
+        while True:
+            if isinstance(t, c_ast.PtrDecl):
+                plvl += 1
+            elif isinstance(t, c_ast.ArrayDecl):
+                alvl += 1
+            elif isinstance(t, (c_ast.TypeDecl, c_ast.DataDecl)):
+                name = t.declname if isinstance(t, c_ast.TypeDecl) else t.name
+                self.scope_set(name, t, plvl, alvl)
+                break
+            else:
+                break
+            t = t.type
         return s
+
+    def _generate_datadecl(self, n, modifiers):
+        mods = ""
+        for m in modifiers:
+            if isinstance(m, c_ast.PtrDecl):
+                mods += "*"
+            else:
+                raise RuntimeError("not handling modifier: " + type(m))
+
+        return "struct __data_" + n.dataname + " " + mods + n.name
 
     def _generate_type(self, n, modifiers=[], emit_declname = True):
         """ Recursive generation from a type node. n is the type node.
@@ -476,6 +623,8 @@ class CGenerator(object):
         elif typ in (c_ast.ArrayDecl, c_ast.PtrDecl, c_ast.FuncDecl):
             return self._generate_type(n.type, modifiers + [n],
                                        emit_declname = emit_declname)
+        elif typ == c_ast.DataDecl:
+            return self._generate_datadecl(n, modifiers)
         else:
             return self.visit(n)
 

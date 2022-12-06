@@ -1123,3 +1123,92 @@ class Pragma(Node):
 
     attr_names = ('string', )
 
+class DataDef(Node):
+    __slots__ = ('name', 'types', 'coord', '__weakref__')
+    def __init__(self, name, types, coord=None):
+        self.name = name
+        self.types = types
+        self.coord = coord
+
+    def children(self):
+        nodelist = []
+        return tuple(nodelist)
+
+    def __iter__(self):
+        return
+        yield
+
+    attr_names = ('name', 'types', )
+
+class DataDecl(Node):
+    __slots__ = ('name', 'dataname', 'types', 'coord', '__weakref__')
+    def __init__(self, name, dataname, types, coord=None):
+        self.name = name
+        self.dataname = dataname
+        self.types = types
+        self.coord = coord
+
+    def children(self):
+        nodelist = []
+        return tuple(nodelist)
+
+    def __iter__(self):
+        return
+        yield
+
+    attr_names = ('name', 'dataname', 'types', )
+
+class DataSet(Node):
+    __slots__ = ('target', 'type', 'expr', 'derefs', 'coord', '__weakref__')
+    def __init__(self, target, type, expr, derefs, coord=None):
+        self.target = target
+        self.type = type
+        self.expr = expr
+        self.derefs = derefs
+        self.coord = coord
+
+    def children(self):
+        nodelist = []
+        return tuple(nodelist)
+
+    def __iter__(self):
+        return
+        yield
+
+    attr_names = ('target', 'type', 'expr', 'derefs', )
+
+class Match(Node):
+    __slots__ = ('target', 'matchers', 'coord', '__weakref__')
+    def __init__(self, target, matchers, coord=None):
+        self.target = target
+        self.matchers = matchers
+        self.coord = coord
+
+    def children(self):
+        nodelist = []
+        return tuple(nodelist)
+
+    def __iter__(self):
+        return
+        yield
+
+    attr_names = ('target', 'matchers', )
+
+class Matcher(Node):
+    __slots__ = ('type', 'varname', 'block', 'coord', '__weakref__')
+    def __init__(self, type, varname, block, coord=None):
+        self.type = type
+        self.varname = varname
+        self.block = block
+        self.coord = coord
+
+    def children(self):
+        nodelist = []
+        return tuple(nodelist)
+
+    def __iter__(self):
+        return
+        yield
+
+    attr_names = ('type', 'varname', 'block', )
+
